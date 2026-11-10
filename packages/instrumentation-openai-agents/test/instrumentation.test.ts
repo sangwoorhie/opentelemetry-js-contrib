@@ -4,6 +4,7 @@
  */
 
 import * as assert from 'assert';
+import { diag, DiagLogLevel } from '@opentelemetry/api';
 import type { InstrumentationNodeModuleDefinition } from '@opentelemetry/instrumentation';
 import { OpenAIAgentsInstrumentation } from '../src';
 import type {
@@ -120,6 +121,62 @@ describe('OpenAIAgentsInstrumentation', () => {
 
     assert.strictEqual(module.added.length, 1);
     instrumentation.disable();
+  });
+
+  it('registers through the default export of an ESM namespace', () => {
+    const instrumentation = new OpenAIAgentsInstrumentation();
+    const module = createMockModule();
+    const originalRun = module.Runner.prototype.run;
+    const namespace = { default: module };
+    const definition = getDefinition(instrumentation);
+
+    assert.strictEqual(definition.patch!(namespace, '0.14.3'), namespace);
+    assert.strictEqual(module.added.length, 1);
+    assert.notStrictEqual(module.Runner.prototype.run, originalRun);
+
+    definition.unpatch!(namespace, '0.14.3');
+    assert.strictEqual(module.Runner.prototype.run, originalRun);
+    instrumentation.disable();
+  });
+
+  it('warns and returns exports untouched when the tracing API is missing', () => {
+    const messages: string[] = [];
+    const record = (...args: unknown[]) => {
+      messages.push(args.join(' '));
+    };
+    diag.setLogger(
+      {
+        error: record,
+        warn: record,
+        info: record,
+        debug: record,
+        verbose: record,
+      },
+      DiagLogLevel.WARN
+    );
+
+    try {
+      const instrumentation = new OpenAIAgentsInstrumentation();
+      const definition = getDefinition(instrumentation);
+      const candidates = [null, {}, { default: {} }];
+
+      for (const moduleExports of candidates) {
+        assert.strictEqual(
+          definition.patch!(moduleExports, '0.14.3'),
+          moduleExports
+        );
+      }
+
+      const warnings = messages.filter(message =>
+        message.includes(
+          'Could not find the OpenAI Agents tracing processor API'
+        )
+      );
+      assert.strictEqual(warnings.length, candidates.length);
+      instrumentation.disable();
+    } finally {
+      diag.disable();
+    }
   });
 
   it('reports Runner.run rejections to the tracing processor', async () => {
