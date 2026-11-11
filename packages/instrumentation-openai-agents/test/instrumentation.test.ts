@@ -139,6 +139,83 @@ describe('OpenAIAgentsInstrumentation', () => {
     instrumentation.disable();
   });
 
+  it('returns a non-object Runner.run result without reporting an error', async () => {
+    const instrumentation = new OpenAIAgentsInstrumentation();
+    const module = createMockModule();
+    const definition = getDefinition(instrumentation);
+    definition.patch!(module, '0.14.0');
+
+    const processor = module.processors[0] as OpenAIAgentsTracingProcessor & {
+      onRunError(runToken: object, error: unknown): void;
+      onRunStreamStart(runToken: object, traceId: string | undefined): void;
+    };
+    const originalOnRunError = processor.onRunError.bind(processor);
+    const originalOnRunStreamStart = processor.onRunStreamStart.bind(processor);
+    let errorReported = false;
+    let streamStarted = false;
+    processor.onRunError = (runToken, error) => {
+      errorReported = true;
+      originalOnRunError(runToken, error);
+    };
+    processor.onRunStreamStart = (runToken, traceId) => {
+      streamStarted = true;
+      originalOnRunStreamStart(runToken, traceId);
+    };
+
+    assert.strictEqual(await module.Runner.prototype.run(), undefined);
+    assert.strictEqual(errorReported, false);
+    assert.strictEqual(streamStarted, false);
+
+    definition.unpatch!(module, '0.14.0');
+    instrumentation.disable();
+  });
+
+  it('passes withTrace calls without a callback through unchanged', () => {
+    type Passthrough = (...args: unknown[]) => unknown;
+    const instrumentation = new OpenAIAgentsInstrumentation();
+    const module = createMockModule();
+    const result = { passthrough: true };
+    let receivedArgs: unknown[] | undefined;
+    module.withTrace = ((...args: unknown[]) => {
+      receivedArgs = args;
+      return result;
+    }) as unknown as typeof module.withTrace;
+    const definition = getDefinition(instrumentation);
+    definition.patch!(module, '0.14.0');
+
+    const notCallback = { name: 'not-a-callback' };
+    const withTrace = module.withTrace as unknown as Passthrough;
+
+    assert.strictEqual(withTrace('workflow', notCallback), result);
+    assert.strictEqual(receivedArgs?.[1], notCallback);
+
+    definition.unpatch!(module, '0.14.0');
+    instrumentation.disable();
+  });
+
+  it('passes getOrCreateTrace calls without a callback through unchanged', () => {
+    type Passthrough = (...args: unknown[]) => unknown;
+    const instrumentation = new OpenAIAgentsInstrumentation();
+    const module = createMockModule();
+    const result = { passthrough: true };
+    let receivedArgs: unknown[] | undefined;
+    module.getOrCreateTrace = ((...args: unknown[]) => {
+      receivedArgs = args;
+      return result;
+    }) as unknown as typeof module.getOrCreateTrace;
+    const definition = getDefinition(instrumentation);
+    definition.patch!(module, '0.14.0');
+
+    const notCallback = { name: 'not-a-callback' };
+    const getOrCreateTrace = module.getOrCreateTrace as unknown as Passthrough;
+
+    assert.strictEqual(getOrCreateTrace(notCallback), result);
+    assert.strictEqual(receivedArgs?.[0], notCallback);
+
+    definition.unpatch!(module, '0.14.0');
+    instrumentation.disable();
+  });
+
   it('warns and returns exports untouched when the tracing API is missing', () => {
     const messages: string[] = [];
     const record = (...args: unknown[]) => {
