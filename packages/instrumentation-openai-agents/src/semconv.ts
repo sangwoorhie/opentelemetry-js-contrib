@@ -12,6 +12,10 @@ export const ATTR_GEN_AI_TOOL_TYPE = 'gen_ai.tool.type' as const;
 export const ATTR_GEN_AI_TOOL_CALL_ARGUMENTS =
   'gen_ai.tool.call.arguments' as const;
 export const ATTR_GEN_AI_TOOL_CALL_RESULT = 'gen_ai.tool.call.result' as const;
+export const ATTR_GEN_AI_USAGE_INPUT_TOKENS =
+  'gen_ai.usage.input_tokens' as const;
+export const ATTR_GEN_AI_USAGE_OUTPUT_TOKENS =
+  'gen_ai.usage.output_tokens' as const;
 
 export const GEN_AI_OPERATION_NAME_VALUE_INVOKE_AGENT = 'invoke_agent' as const;
 export const GEN_AI_OPERATION_NAME_VALUE_EXECUTE_TOOL = 'execute_tool' as const;
