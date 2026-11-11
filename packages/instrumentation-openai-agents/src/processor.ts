@@ -34,8 +34,25 @@ import {
   GEN_AI_OPERATION_NAME_VALUE_EXECUTE_TOOL,
   GEN_AI_OPERATION_NAME_VALUE_INVOKE_AGENT,
   GEN_AI_TOOL_TYPE_VALUE_FUNCTION,
+  ATTR_GEN_AI_USAGE_INPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
 } from './semconv';
 import type { OpenAIAgentsInstrumentationConfig } from './types';
+
+interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+function addUsage(
+  total: TokenUsage | undefined,
+  usage: TokenUsage
+): TokenUsage {
+  return {
+    inputTokens: (total?.inputTokens ?? 0) + usage.inputTokens,
+    outputTokens: (total?.outputTokens ?? 0) + usage.outputTokens,
+  };
+}
 
 interface SpanRecord {
   context: Context;
@@ -43,6 +60,16 @@ interface SpanRecord {
   errorTarget?: Span;
   agentName?: string;
   runToken?: object;
+  /** Nearest invoke_agent record; it owns the usage of turns below it. */
+  usageTarget?: SpanRecord;
+  /** Nearest enclosing turn record. */
+  turnTarget?: SpanRecord;
+  /** invoke_agent only: usage of the agent's own model calls. */
+  usage?: TokenUsage;
+  /** invoke_agent only: turn-reported usage, nested agents included. */
+  grossUsage?: TokenUsage;
+  /** turn only: gross usage of agents that ran inside this turn. */
+  nestedUsage?: TokenUsage;
 }
 
 interface TraceRecord extends SpanRecord {
@@ -171,6 +198,12 @@ export class OpenAIAgentsTracingProcessor
         agentName,
         runToken: this._activeRunToken(),
       };
+      record.usageTarget =
+        span.spanData.type === 'agent' && otelSpan
+          ? record
+          : parentRecord?.usageTarget;
+      record.turnTarget =
+        span.spanData.type === 'turn' ? record : parentRecord?.turnTarget;
       this._spanRecords.set(span, record);
       this._spanRecordsById.set(span.spanId, record);
       if (otelSpan) {
@@ -187,6 +220,12 @@ export class OpenAIAgentsTracingProcessor
         return;
       }
 
+      if (span.spanData.type === 'turn') {
+        this._addTurnUsage(record, span.spanData.usage);
+      }
+      if (record.usageTarget === record) {
+        this._reportAgentUsage(record);
+      }
       if (record.span) {
         if (span.spanData.type === 'function' && this._captureMessageContent) {
           if (span.spanData.input !== undefined) {
@@ -415,6 +454,45 @@ export class OpenAIAgentsTracingProcessor
       }
     }
     return this._traceRecordsById.get(span.traceId);
+  }
+
+  private _addTurnUsage(record: SpanRecord, usage: unknown): void {
+    const target = record.usageTarget;
+    if (!target || !usage || typeof usage !== 'object') {
+      return;
+    }
+    const { input_tokens: inputTokens, output_tokens: outputTokens } =
+      usage as { input_tokens?: unknown; output_tokens?: unknown };
+    if (typeof inputTokens !== 'number' || typeof outputTokens !== 'number') {
+      return;
+    }
+    // A turn's usage also includes agents that ran inside it, such as agents
+    // used as tools. Those agents report their own usage, so only the
+    // remainder belongs to this agent.
+    const nested = record.nestedUsage;
+    target.usage = addUsage(target.usage, {
+      inputTokens: Math.max(0, inputTokens - (nested?.inputTokens ?? 0)),
+      outputTokens: Math.max(0, outputTokens - (nested?.outputTokens ?? 0)),
+    });
+    target.grossUsage = addUsage(target.grossUsage, {
+      inputTokens,
+      outputTokens,
+    });
+  }
+
+  private _reportAgentUsage(record: SpanRecord): void {
+    if (record.span && record.usage) {
+      record.span.setAttributes({
+        [ATTR_GEN_AI_USAGE_INPUT_TOKENS]: record.usage.inputTokens,
+        [ATTR_GEN_AI_USAGE_OUTPUT_TOKENS]: record.usage.outputTokens,
+      });
+    }
+    if (record.turnTarget && record.grossUsage) {
+      record.turnTarget.nestedUsage = addUsage(
+        record.turnTarget.nestedUsage,
+        record.grossUsage
+      );
+    }
   }
 
   private _endTrace(record: TraceRecord, endTime?: TimeInput): void {

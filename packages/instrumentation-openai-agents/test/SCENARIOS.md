@@ -43,6 +43,19 @@ Three behaviors are easy to get wrong and are asserted repeatedly:
 H3 matters because the agent loops once per model turn; a per-turn span would be wrong.
 H4 is the only source of genuine `invoke_agent` nesting.
 
+## U — token usage
+
+| ID | Test name | Expected |
+| --- | --- | --- |
+| U1 | `sums token usage across the turns of one agent` | `invoke_agent` carries the sum of its turns' input and output tokens |
+| U2 | `attributes token usage to each agent in a handoff` | Sender and receiver each carry only their own turns' usage |
+| U3 | `keeps an agent-as-tool's usage off its calling agent` | Outer and inner agents each carry only their own usage |
+| U4 | `records token usage for a streamed run` | Same totals as U1 for a streamed run |
+
+Usage comes from the SDK's turn spans, which count only each turn's own model calls.
+U3 is the double-counting guard: an agent-as-tool's tokens must not leak into the
+agent that called it.
+
 ## HO — handoffs
 
 | ID | Test name | Expected |

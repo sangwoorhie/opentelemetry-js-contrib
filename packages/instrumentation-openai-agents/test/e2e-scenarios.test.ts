@@ -65,7 +65,8 @@ describe('OpenAI Agents end-to-end scenarios', function () {
    */
   function scriptedModel(
     turns: AgentOutputItem[][],
-    failOnTurn?: number
+    failOnTurn?: number,
+    usagePerTurn?: { inputTokens: number; outputTokens: number }
   ): Model {
     let turn = 0;
     const nextTurn = () => {
@@ -77,7 +78,12 @@ describe('OpenAI Agents end-to-end scenarios', function () {
     };
     return {
       getResponse: async () => ({
-        usage: new agents.Usage(),
+        usage: usagePerTurn
+          ? new agents.Usage({
+              ...usagePerTurn,
+              totalTokens: usagePerTurn.inputTokens + usagePerTurn.outputTokens,
+            })
+          : new agents.Usage(),
         output: nextTurn(),
       }),
       getStreamedResponse: async function* () {
@@ -86,7 +92,13 @@ describe('OpenAI Agents end-to-end scenarios', function () {
             type: 'response_done',
             response: {
               id: 'scripted-response',
-              usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+              usage: {
+                inputTokens: usagePerTurn?.inputTokens ?? 0,
+                outputTokens: usagePerTurn?.outputTokens ?? 0,
+                totalTokens:
+                  (usagePerTurn?.inputTokens ?? 0) +
+                  (usagePerTurn?.outputTokens ?? 0),
+              },
               output: [item],
             },
           } as never;
@@ -144,6 +156,132 @@ describe('OpenAI Agents end-to-end scenarios', function () {
   }
 
   const tree = () => spanTree(exporter.getFinishedSpans());
+
+  describe('U - token usage', () => {
+    const usageOf = (spanName: string) => {
+      const span = exporter
+        .getFinishedSpans()
+        .find(candidate => candidate.name === spanName);
+      assert.ok(span, `missing span: ${spanName}`);
+      return {
+        input: span.attributes['gen_ai.usage.input_tokens'],
+        output: span.attributes['gen_ai.usage.output_tokens'],
+      };
+    };
+
+    it('U1: sums token usage across the turns of one agent', async () => {
+      const agent = new agents.Agent({
+        name: 'support',
+        tools: [lookupOrder()],
+        model: scriptedModel(
+          [
+            [toolCall('lookup_order', 'c1', '{"orderId":"1"}')],
+            [message('done')],
+          ],
+          undefined,
+          { inputTokens: 10, outputTokens: 3 }
+        ),
+      });
+
+      await agents.run(agent, 'go');
+
+      assert.deepStrictEqual(usageOf('invoke_agent support'), {
+        input: 20,
+        output: 6,
+      });
+    });
+
+    it('U2: attributes token usage to each agent in a handoff', async () => {
+      const receiver = new agents.Agent({
+        name: 'receiver',
+        model: scriptedModel([[message('done')]], undefined, {
+          inputTokens: 7,
+          outputTokens: 2,
+        }),
+      });
+      const toReceiver = agents.handoff(receiver);
+      const sender = new agents.Agent({
+        name: 'sender',
+        handoffs: [toReceiver],
+        model: scriptedModel(
+          [[toolCall(toReceiver.toolName, 'h1')]],
+          undefined,
+          { inputTokens: 11, outputTokens: 4 }
+        ),
+      });
+
+      await agents.run(sender, 'go');
+
+      assert.deepStrictEqual(usageOf('invoke_agent sender'), {
+        input: 11,
+        output: 4,
+      });
+      assert.deepStrictEqual(usageOf('invoke_agent receiver'), {
+        input: 7,
+        output: 2,
+      });
+    });
+
+    it("U3: keeps an agent-as-tool's usage off its calling agent", async () => {
+      const inner = new agents.Agent({
+        name: 'inner',
+        model: scriptedModel([[message('inner done')]], undefined, {
+          inputTokens: 5,
+          outputTokens: 1,
+        }),
+      });
+      const outer = new agents.Agent({
+        name: 'outer',
+        model: scriptedModel(
+          [
+            [toolCall('ask_inner', 'c1', '{"input":"hi"}')],
+            [message('outer done')],
+          ],
+          undefined,
+          { inputTokens: 10, outputTokens: 3 }
+        ),
+        tools: [
+          inner.asTool({
+            toolName: 'ask_inner',
+            toolDescription: 'Delegate to the inner agent.',
+          }),
+        ],
+      });
+
+      await agents.run(outer, 'go');
+
+      assert.deepStrictEqual(usageOf('invoke_agent outer'), {
+        input: 20,
+        output: 6,
+      });
+      assert.deepStrictEqual(usageOf('invoke_agent inner'), {
+        input: 5,
+        output: 1,
+      });
+    });
+
+    it('U4: records token usage for a streamed run', async () => {
+      const agent = new agents.Agent({
+        name: 'streamer',
+        tools: [lookupOrder()],
+        model: scriptedModel(
+          [
+            [toolCall('lookup_order', 'c1', '{"orderId":"1"}')],
+            [message('done')],
+          ],
+          undefined,
+          { inputTokens: 10, outputTokens: 3 }
+        ),
+      });
+
+      await drain(await agents.run(agent, 'go', { stream: true }));
+
+      assert.deepStrictEqual(usageOf('invoke_agent streamer'), {
+        input: 20,
+        output: 6,
+      });
+    });
+  });
 
   describe('H - hierarchy', () => {
     it('H1: maps a single agent run to one invoke_agent span', async () => {
