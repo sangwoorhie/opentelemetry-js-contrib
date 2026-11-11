@@ -19,6 +19,7 @@ import type {
   Tracer,
 } from '@opentelemetry/api';
 import { ATTR_ERROR_TYPE } from '@opentelemetry/semantic-conventions';
+import type { TelemetryHandler } from '@opentelemetry/genai-util';
 import type {
   OpenAIAgentsSpan,
   OpenAIAgentsTrace,
@@ -38,6 +39,8 @@ import {
   ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
 } from './semconv';
 import type { OpenAIAgentsInstrumentationConfig } from './types';
+
+type LocalAgentInvocation = ReturnType<TelemetryHandler['startLocalAgent']>;
 
 interface TokenUsage {
   inputTokens: number;
@@ -101,11 +104,20 @@ export class OpenAIAgentsTracingProcessor
   private _pendingStreamRecords = new WeakMap<object, TraceRecord[]>();
   private _failedSpans = new WeakSet<Span>();
   private readonly _openSpans = new Set<Span>();
+  private readonly _agentInvocations = new WeakMap<
+    Span,
+    LocalAgentInvocation
+  >();
+  private readonly _spanErrors = new WeakMap<
+    Span,
+    { errorType: string; message?: string }
+  >();
 
   constructor(
     private readonly _getTracer: () => Tracer,
     config: OpenAIAgentsInstrumentationConfig,
-    private readonly _diag: DiagLogger
+    private readonly _diag: DiagLogger,
+    private readonly _getTelemetry?: () => TelemetryHandler
   ) {
     this.setConfig(config);
   }
@@ -242,7 +254,7 @@ export class OpenAIAgentsTracingProcessor
           }
         }
         this._setError(record.span, span, true);
-        record.span.end(this._asTimeInput(span.endedAt));
+        this._endMappedSpan(record.span, this._asTimeInput(span.endedAt));
         this._openSpans.delete(record.span);
       } else if (
         span.error &&
@@ -404,6 +416,19 @@ export class OpenAIAgentsTracingProcessor
       if (name) {
         attributes[ATTR_GEN_AI_AGENT_NAME] = name;
       }
+      const telemetry = this._getTelemetry?.();
+      if (telemetry) {
+        const invocation = telemetry.startLocalAgent({
+          agentName: name,
+          parentContext,
+          startTime,
+        });
+        const agentSpan = otelTrace.getSpan(invocation.getContext());
+        if (agentSpan) {
+          this._agentInvocations.set(agentSpan, invocation);
+          return agentSpan;
+        }
+      }
       return this._getTracer().startSpan(
         name
           ? `${GEN_AI_OPERATION_NAME_VALUE_INVOKE_AGENT} ${name}`
@@ -481,7 +506,13 @@ export class OpenAIAgentsTracingProcessor
   }
 
   private _reportAgentUsage(record: SpanRecord): void {
-    if (record.span && record.usage) {
+    const invocation = record.span && this._agentInvocations.get(record.span);
+    if (invocation && record.usage) {
+      invocation.setUsage({
+        inputTokenCount: record.usage.inputTokens,
+        outputTokenCount: record.usage.outputTokens,
+      });
+    } else if (record.span && record.usage) {
       record.span.setAttributes({
         [ATTR_GEN_AI_USAGE_INPUT_TOKENS]: record.usage.inputTokens,
         [ATTR_GEN_AI_USAGE_OUTPUT_TOKENS]: record.usage.outputTokens,
@@ -567,6 +598,7 @@ export class OpenAIAgentsTracingProcessor
     }
     this._failedSpans.add(otelSpan);
     const errorType = this._errorType(span.error.data?.error);
+    this._spanErrors.set(otelSpan, { errorType, message: span.error.message });
     otelSpan.recordException({
       name: errorType,
       message: this._errorDetail(span.error.data?.error, span.error.message),
@@ -576,6 +608,23 @@ export class OpenAIAgentsTracingProcessor
       message: span.error.message,
     });
     otelSpan.setAttribute(ATTR_ERROR_TYPE, errorType);
+  }
+
+  private _endMappedSpan(otelSpan: Span, endTime?: TimeInput): void {
+    const invocation = this._agentInvocations.get(otelSpan);
+    if (!invocation) {
+      otelSpan.end(endTime);
+      return;
+    }
+    const error = this._spanErrors.get(otelSpan);
+    if (error) {
+      invocation.fail(
+        { errorType: error.errorType, statusDescription: error.message },
+        endTime
+      );
+    } else {
+      invocation.stop(endTime);
+    }
   }
 
   private _errorType(error: unknown): string {

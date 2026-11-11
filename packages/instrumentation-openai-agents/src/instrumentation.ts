@@ -9,6 +9,8 @@ import {
   isWrapped,
 } from '@opentelemetry/instrumentation';
 import { context } from '@opentelemetry/api';
+import type { MeterProvider, TracerProvider } from '@opentelemetry/api';
+import { TelemetryHandler } from '@opentelemetry/genai-util';
 import type { OpenAIAgentsModule, OpenAIAgentsTrace } from './internal-types';
 import {
   OPENAI_AGENTS_RUN_CONTEXT_KEY,
@@ -36,6 +38,9 @@ export class OpenAIAgentsInstrumentation extends InstrumentationBase<OpenAIAgent
   private _registered = false;
   private _registrationMode?: RegistrationMode;
   private _captureMessageContentFromEnv?: boolean;
+  private _telemetry?: TelemetryHandler;
+  private _telemetryTracerProvider?: TracerProvider;
+  private _telemetryMeterProvider?: MeterProvider;
 
   constructor(config: OpenAIAgentsInstrumentationConfig = {}) {
     super(PACKAGE_NAME, PACKAGE_VERSION, config);
@@ -118,12 +123,36 @@ export class OpenAIAgentsInstrumentation extends InstrumentationBase<OpenAIAgent
     ];
   }
 
+  override setTracerProvider(provider: TracerProvider): void {
+    super.setTracerProvider(provider);
+    this._telemetryTracerProvider = provider;
+    this._telemetry = undefined;
+  }
+
+  override setMeterProvider(provider: MeterProvider): void {
+    super.setMeterProvider(provider);
+    this._telemetryMeterProvider = provider;
+    this._telemetry = undefined;
+  }
+
+  private _getTelemetry(): TelemetryHandler {
+    return (this._telemetry ??= new TelemetryHandler({
+      instrumentationName: PACKAGE_NAME,
+      instrumentationVersion: PACKAGE_VERSION,
+      tracerProvider: this._telemetryTracerProvider,
+      meterProvider: this._telemetryMeterProvider,
+      diag: this._diag,
+      contentCaptureMode: 'none',
+    }));
+  }
+
   private _getProcessor(): OpenAIAgentsTracingProcessor {
     if (!this._processor) {
       this._processor = new OpenAIAgentsTracingProcessor(
         () => this.tracer,
         this.getConfig(),
-        this._diag
+        this._diag,
+        () => this._getTelemetry()
       );
     }
     return this._processor;
